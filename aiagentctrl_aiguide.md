@@ -3,12 +3,13 @@
 SPDX-License-Identifier: GPL-2.0-or-later
 
 What it is
-- A single-file CLI to drive, steer, move the camera head (pan/tilt), read ultrasonic distance, and stop the SunFounder PiCar‑X.
-- Outputs a one-line dict by default or exact JSON with `--json`.
+- A single‑file CLI for SunFounder PiCar‑X v2.0 (robot_hat), to drive, steer, move the camera head (pan/tilt), read ultrasonic distance, capture camera snapshots, and stop.
+- Outputs a one‑line dict by default or exact JSON with `--json`.
 
 Prereqs
-- Run from the repository root so the local `picarx` module is importable.
-- PiCar‑X 3.0.x stack (uses `fusion_hat`); also works with many legacy name variants.
+- v2.0 stack: uses `robot_hat` (I2C at 0x14 on bus 1) and `vilib` for camera.
+- Run from repo root or install editable: `python3 -m pip install -e . --break-system-packages`.
+- If not installing, prefix examples/CLI with `PYTHONPATH=.`.
 
 Safety notes
 - Motors always stop after each command (dead‑man stop), and on Ctrl‑C/SIGTERM.
@@ -21,35 +22,38 @@ Command reference
   - Duration 0.0 returns immediately; motors still stop on command exit.
 - `steer --angle <int>`
   - Angle clamped to `[-PICARX_MAX_ANGLE, PICARX_MAX_ANGLE]`.
-- `head --pan <int?> --tilt <int?>`
+- `head --pan <int?> --tilt <int?> [--no-smooth]`
   - Each angle clamped to `[-PICARX_MAX_ANGLE, PICARX_MAX_ANGLE]`.
-  - The head position persists across commands. It remains where you set it until changed again (e.g., `--pan 0 --tilt 0`).
+  - Smooth by default (small steps per 15–20 ms). Add `--no-smooth` for immediate moves.
+  - The head position persists across commands; it stays where you set it until changed again (e.g., `--pan 0 --tilt 0`).
 - `ultrasonic`
   - Prints distance in centimeters as `distance_cm`.
 - `stop`
   - Immediately stops motors.
+- `snapshot [--path <file>] [--vflip] [--hflip]`
+  - Captures one image via `vilib`. Default path: `/opt/picar-x/snapshots/snap-<timestamp>.jpg`.
 
 Environment variables
 - `PICARX_MAX_SPEED` (default 60): speed clamp for `drive`.
 - `PICARX_MAX_ANGLE` (default 35): clamp for steering and pan/tilt.
-- `PICARX_FAKE=1`: mock hardware for CI/dry‑run; returns plausible ultrasonic values.
-- `PICARX_I2C_BUS`: override I2C bus if needed (e.g., `11` on some Pi 5 setups). If unset, the controller auto‑prefers bus 11 when `/dev/i2c-11` exists, otherwise bus 1.
-- `PICARX_PREFER_LOCAL` (default `1`): set to `0` to ignore the current repo module, useful when using a site‑installed or alternate checkout.
-- `PICARX_MODULE_DIR`: prepend a specific path to `sys.path` before import (e.g., point at a `v2.0` checkout directory).
- - `PICARX_STATE_FILE`: optional path to persist head state (default `/opt/picar-x/aiagentctrl_state.json`). Delete this file to clear saved head position.
+- `PICARX_FAKE=1`: mock hardware (no motion) with plausible `ultrasonic`.
+- `PICARX_I2C_BUS` (default 1 on v2): override I2C bus.
+- `PICARX_PREFER_LOCAL` (default `1`): set `0` to prefer site‑installed module.
+- `PICARX_MODULE_DIR`: prepend a specific path to import (`v2.0` checkout, etc.).
+- `PICARX_STATE_FILE`: file to persist head state (default `/opt/picar-x/aiagentctrl_state.json`).
+- `PICARX_HEAD_NO_SMOOTH=1`: disable default smooth head moves globally.
+- `PICARX_SMOOTH_STEP` (deg, default 2) and `PICARX_SMOOTH_DELAY` (sec, default 0.015): tune smoothness.
 
-Examples
+Examples (v2)
 - Plain shell
   - `python3 aiagentctrl.py --help`
-  - `PICARX_FAKE=1 python3 aiagentctrl.py ultrasonic --json`
-  - `python3 aiagentctrl.py steer --angle 20`
-  - `python3 aiagentctrl.py head --pan -15 --tilt 10 --json`
-  - `python3 aiagentctrl.py drive --speed 30 --seconds 0.5 --direction forward`
-
-- Codex exec snippet
-  - `PICARX_FAKE=1 python3 aiagentctrl.py steer --angle 999 --json`  # shows clamped value
+  - `PICARX_PREFER_LOCAL=1 PICARX_I2C_BUS=1 python3 aiagentctrl.py drive --speed 30 --seconds 0.5 --direction forward --json`
+  - `python3 aiagentctrl.py head --pan -12 --tilt 7 --json`  # smooth move and persist
+  - `python3 aiagentctrl.py snapshot --path /home/admin/Pictures/test.jpg --json`
+  - `PICARX_FAKE=1 python3 aiagentctrl.py steer --angle 999 --json`  # clamp demo
 
 Troubleshooting
-- Import path: run from the repo root so `picarx` is resolved; `aiagentctrl.py` adds `.` to `sys.path` as a fallback.
-- JSON output: add `--json` for a single JSON object on stdout.
+- Import path: install editable or prefix with `PYTHONPATH=.` from repo root.
+- Ultrasonic: if returning negative/erratic, check sensor cabling and `robot_hat` I2C on bus 1.
+- Camera: if snapshot hangs, verify camera is enabled and working (`example/7.display.py`), then re‑try.
 - Motors keep running? Use `python3 aiagentctrl.py stop` or Ctrl‑C; the controller also stops on any error.
