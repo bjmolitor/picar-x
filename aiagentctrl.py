@@ -10,10 +10,12 @@ import signal
 import sys
 import time
 from typing import Any, Dict, Optional
+from datetime import datetime
 
 
 # ---- Globals for signal handling ----
 _PX_OBJ = None  # set after we create the car instance
+_STATE_PATH_DEFAULT = "/opt/picar-x/aiagentctrl_state.json"
 
 
 def _env_int(name: str, default: int) -> int:
@@ -42,6 +44,37 @@ def _safe_stop(px: Any) -> None:
                 pass
     except Exception:
         pass
+
+
+def _get_state_path() -> str:
+    return os.environ.get("PICARX_STATE_FILE", _STATE_PATH_DEFAULT)
+
+
+def _load_state() -> Dict[str, Any]:
+    try:
+        with open(_get_state_path(), "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _save_state(state: Dict[str, Any]) -> None:
+    path = _get_state_path()
+    tmp = path + ".tmp"
+    try:
+        # Ensure directory exists
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(state, f, separators=(",", ":"))
+        os.replace(tmp, path)
+    except Exception:
+        # fallback to home dir if /opt not writable
+        try:
+            home_fallback = os.path.join(os.path.expanduser("~"), ".aiagentctrl_state.json")
+            with open(home_fallback, "w", encoding="utf-8") as f:
+                json.dump(state, f, separators=(",", ":"))
+        except Exception:
+            pass
 
 
 def _signal_handler(signum, frame):
@@ -294,15 +327,71 @@ def _do_steer(px: Any, angle: int, max_angle: int) -> Dict[str, Any]:
 
 
 def _do_head(px: Any, pan: Optional[int], tilt: Optional[int], max_angle: int) -> Dict[str, Any]:
-    applied = {}
-    if pan is not None:
-        p = int(_clamp(pan, -max_angle, max_angle))
-        _call_method(px, ['set_camera_pan_angle', 'set_cam_pan_angle', 'set_pan_angle'], p)
-        applied['pan'] = p
-    if tilt is not None:
-        t = int(_clamp(tilt, -max_angle, max_angle))
-        _call_method(px, ['set_camera_tilt_angle', 'set_cam_tilt_angle', 'set_tilt_angle'], t)
-        applied['tilt'] = t
+    # Defaults if no target provided: keep previous
+    applied: Dict[str, int] = {}
+    state = _load_state()
+    prev_head = state.get('head', {})
+    prev_pan = int(prev_head.get('pan', 0))
+    prev_tilt = int(prev_head.get('tilt', 0))
+
+    target_pan = prev_pan if pan is None else int(_clamp(pan, -max_angle, max_angle))
+    target_tilt = prev_tilt if tilt is None else int(_clamp(tilt, -max_angle, max_angle))
+
+    # Smooth movement parameters
+    no_smooth = os.environ.get('PICARX_HEAD_NO_SMOOTH', '0') == '1'
+    step_deg = max(1, _env_int('PICARX_SMOOTH_STEP', 2))
+    step_delay = max(0.0, float(os.environ.get('PICARX_SMOOTH_DELAY', '0.015')))
+
+    def _step_range(src: int, dst: int, step: int):
+        if src == dst:
+            return [dst]
+        points = []
+        sgn = 1 if dst > src else -1
+        cur = src
+        while (cur - dst) * sgn < 0:
+            cur = cur + sgn * step
+            if (cur - dst) * sgn > 0:
+                cur = dst
+            points.append(cur)
+        return points or [dst]
+
+    if no_smooth or (target_pan == prev_pan and target_tilt == prev_tilt):
+        # Direct set
+        if pan is not None:
+            _call_method(px, ['set_camera_pan_angle', 'set_cam_pan_angle', 'set_pan_angle'], target_pan)
+            applied['pan'] = target_pan
+        if tilt is not None:
+            _call_method(px, ['set_camera_tilt_angle', 'set_cam_tilt_angle', 'set_tilt_angle'], target_tilt)
+            applied['tilt'] = target_tilt
+    else:
+        # Smooth, step both axes toward targets
+        pan_points = _step_range(prev_pan, target_pan, step_deg)
+        tilt_points = _step_range(prev_tilt, target_tilt, step_deg)
+        # Iterate up to the max length, using last value when sequence is shorter
+        max_len = max(len(pan_points), len(tilt_points))
+        for i in range(max_len):
+            p_val = pan_points[min(i, len(pan_points)-1)] if pan is not None else prev_pan
+            t_val = tilt_points[min(i, len(tilt_points)-1)] if tilt is not None else prev_tilt
+            _call_method(px, ['set_camera_pan_angle', 'set_cam_pan_angle', 'set_pan_angle'], p_val)
+            _call_method(px, ['set_camera_tilt_angle', 'set_cam_tilt_angle', 'set_tilt_angle'], t_val)
+            if step_delay > 0:
+                time.sleep(step_delay)
+        if pan is not None:
+            applied['pan'] = target_pan
+        if tilt is not None:
+            applied['tilt'] = target_tilt
+    # Persist head state so it remains across commands
+    try:
+        state = _load_state()
+        head = state.get('head', {})
+        if 'pan' in applied:
+            head['pan'] = applied['pan']
+        if 'tilt' in applied:
+            head['tilt'] = applied['tilt']
+        state['head'] = head
+        _save_state(state)
+    except Exception:
+        pass
     return {
         'ok': True,
         'action': 'head',
@@ -311,6 +400,47 @@ def _do_head(px: Any, pan: Optional[int], tilt: Optional[int], max_angle: int) -
         'applied': applied,
         'max_angle': max_angle,
     }
+
+
+def _do_snapshot(px: Any, out_path: Optional[str] = None, vflip: bool = False, hflip: bool = False) -> Dict[str, Any]:
+    # Use vilib for camera handling (v2 stack includes vilib)
+    try:
+        from vilib import Vilib
+    except Exception as e:
+        return {'ok': False, 'action': 'snapshot', 'error': f'vilib import failed: {e}'}
+
+    # Determine output path
+    if out_path:
+        out_dir = os.path.dirname(out_path)
+        out_name = os.path.splitext(os.path.basename(out_path))[0]
+    else:
+        out_dir = os.path.join('/opt', 'picar-x', 'snapshots')
+        ts = datetime.now().strftime('%Y%m%d-%H%M%S')
+        out_name = f'snap-{ts}'
+        out_path = os.path.join(out_dir, out_name + '.jpg')
+    try:
+        os.makedirs(out_dir, exist_ok=True)
+    except Exception:
+        # Fallback to home Pictures directory
+        home_dir = os.path.join(os.path.expanduser('~'), 'Pictures')
+        os.makedirs(home_dir, exist_ok=True)
+        out_dir = home_dir
+        out_path = os.path.join(out_dir, out_name + '.jpg')
+
+    try:
+        Vilib.camera_start(vflip=bool(vflip), hflip=bool(hflip))
+        # Small delay to warm up
+        time.sleep(0.2)
+        # Vilib.take_photo takes base name and path (dir)
+        Vilib.take_photo(out_name, out_dir)
+        # Attempt to close camera
+        try:
+            Vilib.camera_close()
+        except Exception:
+            pass
+        return {'ok': True, 'action': 'snapshot', 'path': out_path}
+    except Exception as e:
+        return {'ok': False, 'action': 'snapshot', 'error': str(e), 'path': out_path}
 
 
 def _do_ultrasonic(px: Any) -> Dict[str, Any]:
@@ -405,11 +535,18 @@ def parse_args(argv=None):
     p_head.add_argument('--json', action='store_true', help=argparse.SUPPRESS)
     p_head.add_argument('--pan', type=int, help='Pan angle -PICARX_MAX_ANGLE..PICARX_MAX_ANGLE')
     p_head.add_argument('--tilt', type=int, help='Tilt angle -PICARX_MAX_ANGLE..PICARX_MAX_ANGLE')
+    p_head.add_argument('--no-smooth', action='store_true', help='Disable smoothing for this head move')
 
     p_ultra = sub.add_parser('ultrasonic', help='Read ultrasonic distance (cm)')
     p_ultra.add_argument('--json', action='store_true', help=argparse.SUPPRESS)
     p_stop = sub.add_parser('stop', help='Stop motors immediately')
     p_stop.add_argument('--json', action='store_true', help=argparse.SUPPRESS)
+
+    p_snap = sub.add_parser('snapshot', help='Capture an image from the camera')
+    p_snap.add_argument('--json', action='store_true', help=argparse.SUPPRESS)
+    p_snap.add_argument('--path', type=str, help='Output image path (default: /opt/picar-x/snapshots/snap-<ts>.jpg)')
+    p_snap.add_argument('--vflip', action='store_true', help='Vertical flip')
+    p_snap.add_argument('--hflip', action='store_true', help='Horizontal flip')
 
     return parser.parse_args(argv)
 
@@ -427,6 +564,17 @@ def main(argv=None) -> int:
     global _PX_OBJ
     _PX_OBJ = _make_px(fake)
 
+    # Restore previously set head position so it persists across commands
+    if args.command != 'head':
+        try:
+            st = _load_state().get('head', {})
+            if 'pan' in st:
+                _call_method(_PX_OBJ, ['set_camera_pan_angle', 'set_cam_pan_angle', 'set_pan_angle'], int(_clamp(st['pan'], -max_angle, max_angle)))
+            if 'tilt' in st:
+                _call_method(_PX_OBJ, ['set_camera_tilt_angle', 'set_cam_tilt_angle', 'set_tilt_angle'], int(_clamp(st['tilt'], -max_angle, max_angle)))
+        except Exception:
+            pass
+
     result: Dict[str, Any] = {'ok': False}
 
     try:
@@ -440,6 +588,9 @@ def main(argv=None) -> int:
             result = _do_steer(_PX_OBJ, args.angle, max_angle)
 
         elif args.command == 'head':
+            # Allow per-command override of smoothing
+            if args.no_smooth:
+                os.environ['PICARX_HEAD_NO_SMOOTH'] = '1'
             result = _do_head(_PX_OBJ, args.pan, args.tilt, max_angle)
 
         elif args.command == 'ultrasonic':
@@ -447,6 +598,9 @@ def main(argv=None) -> int:
 
         elif args.command == 'stop':
             result = _do_stop(_PX_OBJ)
+
+        elif args.command == 'snapshot':
+            result = _do_snapshot(_PX_OBJ, getattr(args, 'path', None), getattr(args, 'vflip', False), getattr(args, 'hflip', False))
 
         else:
             raise ValueError(f"Unknown command: {args.command}")

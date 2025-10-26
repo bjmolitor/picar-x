@@ -23,6 +23,7 @@ Command reference
   - Angle clamped to `[-PICARX_MAX_ANGLE, PICARX_MAX_ANGLE]`.
 - `head --pan <int?> --tilt <int?>`
   - Each angle clamped to `[-PICARX_MAX_ANGLE, PICARX_MAX_ANGLE]`.
+  - The head position persists across commands. It remains where you set it until changed again (e.g., `--pan 0 --tilt 0`).
 - `ultrasonic`
   - Prints distance in centimeters as `distance_cm`.
 - `stop`
@@ -33,8 +34,9 @@ Environment variables
 - `PICARX_MAX_ANGLE` (default 35): clamp for steering and pan/tilt.
 - `PICARX_FAKE=1`: mock hardware for CI/dry‑run; returns plausible ultrasonic values.
 - `PICARX_I2C_BUS`: override I2C bus if needed (e.g., `11` on some Pi 5 setups). If unset, the controller auto‑prefers bus 11 when `/dev/i2c-11` exists, otherwise bus 1.
- - `PICARX_PREFER_LOCAL` (default `1`): set to `0` to ignore the current repo module, useful when using a site‑installed or alternate checkout.
- - `PICARX_MODULE_DIR`: prepend a specific path to `sys.path` before import (e.g., point at a `v2.0` checkout directory).
+- `PICARX_PREFER_LOCAL` (default `1`): set to `0` to ignore the current repo module, useful when using a site‑installed or alternate checkout.
+- `PICARX_MODULE_DIR`: prepend a specific path to `sys.path` before import (e.g., point at a `v2.0` checkout directory).
+ - `PICARX_STATE_FILE`: optional path to persist head state (default `/opt/picar-x/aiagentctrl_state.json`). Delete this file to clear saved head position.
 
 Examples
 - Plain shell
