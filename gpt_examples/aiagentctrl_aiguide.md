@@ -30,7 +30,7 @@ Command reference
 - `stop`
   - Immediately stops motors.
 - `snapshot [--path <file>] [--vflip] [--hflip]`
-  - Captures one image via `vilib`. Default path: `/opt/picar-x/snapshots/snap-<timestamp>.jpg`.
+  - Captures one image via `vilib`. Default path: `gpt_examples/aiagent_camera/snap-<timestamp>.jpg` (auto-created).
 
 Environment variables
 - `PICARX_MAX_SPEED` (default 60): speed clamp for `drive`.

@@ -16,6 +16,7 @@ from datetime import datetime
 # ---- Globals for signal handling ----
 _PX_OBJ = None  # set after we create the car instance
 _STATE_PATH_DEFAULT = "/opt/picar-x/aiagentctrl_state.json"
+_CAMERA_DEFAULT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "aiagent_camera")
 
 
 def _env_int(name: str, default: int) -> int:
@@ -373,7 +374,7 @@ def _do_snapshot(px: Any, out_path: Optional[str] = None, vflip: bool = False, h
         out_dir = os.path.dirname(out_path)
         out_name = os.path.splitext(os.path.basename(out_path))[0]
     else:
-        out_dir = os.path.join('/opt', 'picar-x', 'snapshots')
+        out_dir = _CAMERA_DEFAULT_DIR
         ts = datetime.now().strftime('%Y%m%d-%H%M%S')
         out_name = f'snap-{ts}'
         out_path = os.path.join(out_dir, out_name + '.jpg')
@@ -502,7 +503,7 @@ def parse_args(argv=None):
 
     p_snap = sub.add_parser('snapshot', help='Capture an image from the camera')
     p_snap.add_argument('--json', action='store_true', help=argparse.SUPPRESS)
-    p_snap.add_argument('--path', type=str, help='Output image path (default: /opt/picar-x/snapshots/snap-<ts>.jpg)')
+    p_snap.add_argument('--path', type=str, help='Output image path (default: gpt_examples/aiagent_camera/snap-<ts>.jpg)')
     p_snap.add_argument('--vflip', action='store_true', help='Vertical flip')
     p_snap.add_argument('--hflip', action='store_true', help='Horizontal flip')
 
