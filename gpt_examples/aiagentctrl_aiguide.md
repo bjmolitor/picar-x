@@ -22,10 +22,9 @@ Command reference
   - Duration 0.0 returns immediately; motors still stop on command exit.
 - `steer --angle <int>`
   - Angle clamped to `[-PICARX_MAX_ANGLE, PICARX_MAX_ANGLE]`.
-- `head --pan <int?> --tilt <int?> [--no-smooth]`
+- `head --pan <int?> --tilt <int?>`
   - Each angle clamped to `[-PICARX_MAX_ANGLE, PICARX_MAX_ANGLE]`.
-  - Smooth by default (small steps per 15–20 ms). Add `--no-smooth` for immediate moves.
-  - The head position persists across commands; it stays where you set it until changed again (e.g., `--pan 0 --tilt 0`).
+  - Immediate movement; position persists until changed again (e.g., `--pan 0 --tilt 0`).
 - `ultrasonic`
   - Prints distance in centimeters as `distance_cm`.
 - `stop`
@@ -41,8 +40,6 @@ Environment variables
 - `PICARX_PREFER_LOCAL` (default `1`): set `0` to prefer site‑installed module.
 - `PICARX_MODULE_DIR`: prepend a specific path to import (`v2.0` checkout, etc.).
 - `PICARX_STATE_FILE`: file to persist head state (default `/opt/picar-x/aiagentctrl_state.json`).
-- `PICARX_HEAD_NO_SMOOTH=1`: disable default smooth head moves globally.
-- `PICARX_SMOOTH_STEP` (deg, default 2) and `PICARX_SMOOTH_DELAY` (sec, default 0.015): tune smoothness.
 
 Examples (v2)
 - Plain shell

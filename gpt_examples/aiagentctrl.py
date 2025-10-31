@@ -327,67 +327,26 @@ def _do_steer(px: Any, angle: int, max_angle: int) -> Dict[str, Any]:
 
 
 def _do_head(px: Any, pan: Optional[int], tilt: Optional[int], max_angle: int) -> Dict[str, Any]:
-    # Defaults if no target provided: keep previous
     applied: Dict[str, int] = {}
     state = _load_state()
     prev_head = state.get('head', {})
-    prev_pan = int(prev_head.get('pan', 0))
-    prev_tilt = int(prev_head.get('tilt', 0))
 
-    target_pan = prev_pan if pan is None else int(_clamp(pan, -max_angle, max_angle))
-    target_tilt = prev_tilt if tilt is None else int(_clamp(tilt, -max_angle, max_angle))
+    target_pan = int(prev_head.get('pan', 0)) if pan is None else int(_clamp(pan, -max_angle, max_angle))
+    target_tilt = int(prev_head.get('tilt', 0)) if tilt is None else int(_clamp(tilt, -max_angle, max_angle))
 
-    # Smooth movement parameters
-    no_smooth = os.environ.get('PICARX_HEAD_NO_SMOOTH', '0') == '1'
-    step_deg = max(1, _env_int('PICARX_SMOOTH_STEP', 2))
-    step_delay = max(0.0, float(os.environ.get('PICARX_SMOOTH_DELAY', '0.015')))
+    _call_method(px, ['set_camera_pan_angle', 'set_cam_pan_angle', 'set_pan_angle'], target_pan)
+    _call_method(px, ['set_camera_tilt_angle', 'set_cam_tilt_angle', 'set_tilt_angle'], target_tilt)
 
-    def _step_range(src: int, dst: int, step: int):
-        if src == dst:
-            return [dst]
-        points = []
-        sgn = 1 if dst > src else -1
-        cur = src
-        while (cur - dst) * sgn < 0:
-            cur = cur + sgn * step
-            if (cur - dst) * sgn > 0:
-                cur = dst
-            points.append(cur)
-        return points or [dst]
-
-    if no_smooth or (target_pan == prev_pan and target_tilt == prev_tilt):
-        # Direct set
-        if pan is not None:
-            _call_method(px, ['set_camera_pan_angle', 'set_cam_pan_angle', 'set_pan_angle'], target_pan)
-            applied['pan'] = target_pan
-        if tilt is not None:
-            _call_method(px, ['set_camera_tilt_angle', 'set_cam_tilt_angle', 'set_tilt_angle'], target_tilt)
-            applied['tilt'] = target_tilt
-    else:
-        # Smooth, step both axes toward targets
-        pan_points = _step_range(prev_pan, target_pan, step_deg)
-        tilt_points = _step_range(prev_tilt, target_tilt, step_deg)
-        # Iterate up to the max length, using last value when sequence is shorter
-        max_len = max(len(pan_points), len(tilt_points))
-        for i in range(max_len):
-            p_val = pan_points[min(i, len(pan_points)-1)] if pan is not None else prev_pan
-            t_val = tilt_points[min(i, len(tilt_points)-1)] if tilt is not None else prev_tilt
-            _call_method(px, ['set_camera_pan_angle', 'set_cam_pan_angle', 'set_pan_angle'], p_val)
-            _call_method(px, ['set_camera_tilt_angle', 'set_cam_tilt_angle', 'set_tilt_angle'], t_val)
-            if step_delay > 0:
-                time.sleep(step_delay)
-        if pan is not None:
-            applied['pan'] = target_pan
-        if tilt is not None:
-            applied['tilt'] = target_tilt
+    if pan is not None:
+        applied['pan'] = target_pan
+    if tilt is not None:
+        applied['tilt'] = target_tilt
     # Persist head state so it remains across commands
     try:
         state = _load_state()
         head = state.get('head', {})
-        if 'pan' in applied:
-            head['pan'] = applied['pan']
-        if 'tilt' in applied:
-            head['tilt'] = applied['tilt']
+        head['pan'] = target_pan
+        head['tilt'] = target_tilt
         state['head'] = head
         _save_state(state)
     except Exception:
@@ -535,7 +494,6 @@ def parse_args(argv=None):
     p_head.add_argument('--json', action='store_true', help=argparse.SUPPRESS)
     p_head.add_argument('--pan', type=int, help='Pan angle -PICARX_MAX_ANGLE..PICARX_MAX_ANGLE')
     p_head.add_argument('--tilt', type=int, help='Tilt angle -PICARX_MAX_ANGLE..PICARX_MAX_ANGLE')
-    p_head.add_argument('--no-smooth', action='store_true', help='Disable smoothing for this head move')
 
     p_ultra = sub.add_parser('ultrasonic', help='Read ultrasonic distance (cm)')
     p_ultra.add_argument('--json', action='store_true', help=argparse.SUPPRESS)
@@ -588,9 +546,6 @@ def main(argv=None) -> int:
             result = _do_steer(_PX_OBJ, args.angle, max_angle)
 
         elif args.command == 'head':
-            # Allow per-command override of smoothing
-            if args.no_smooth:
-                os.environ['PICARX_HEAD_NO_SMOOTH'] = '1'
             result = _do_head(_PX_OBJ, args.pan, args.tilt, max_angle)
 
         elif args.command == 'ultrasonic':
