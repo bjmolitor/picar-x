@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import signal
+import subprocess
 import sys
 import time
 from typing import Any, Dict, Optional
@@ -88,6 +89,82 @@ def _signal_handler(signum, frame):
 def _setup_signals():
     signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGTERM, _signal_handler)
+
+
+def _ps_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except Exception:
+        return False
+
+
+def _list_gpio_blocker_pids(timeout_s: float = 1.0):
+    """Return a set of PIDs currently holding /dev/gpiochip* using fuser or lsof."""
+    pids = set()
+    cmds = [
+        ['fuser', '-a', '/dev/gpiochip*'],
+        ['lsof', '-nP', '/dev/gpiochip*'],
+    ]
+    for cmd in cmds:
+        try:
+            proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout_s, text=True)
+            out = proc.stdout or ''
+            for tok in out.replace("\n", " ").split():
+                if tok.isdigit():
+                    try:
+                        pids.add(int(tok))
+                    except Exception:
+                        pass
+        except Exception:
+            continue
+    # Filter out our own PID
+    me = os.getpid()
+    return {pid for pid in pids if pid != me}
+
+
+def _free_gpio_blockers(grace_s: float = 0.8):
+    """Attempt to terminate processes blocking GPIO to avoid 'GPIO busy'.
+
+    Controlled by env PICARX_KILL_GPIO_BLOCKERS (default 1). Set to 0 to disable.
+    """
+    if os.environ.get('PICARX_KILL_GPIO_BLOCKERS', '1') == '0':
+        return
+    try:
+        pids = sorted(_list_gpio_blocker_pids())
+        # Also look for common daemon/candidates if nothing reported
+        if not pids:
+            try:
+                ps = subprocess.run(['ps','aux'], stdout=subprocess.PIPE, text=True, timeout=1.0).stdout
+            except Exception:
+                ps = ''
+            candidates = []
+            for line in (ps or '').splitlines():
+                low = line.lower()
+                if 'pigpiod' in low or 'pigpio' in low or 'lgpio' in low or 'gpiozero' in low or 'robot_hat' in low or 'picarx' in low or 'vilib' in low:
+                    parts = line.split()
+                    if len(parts) > 1 and parts[1].isdigit():
+                        candidates.append(int(parts[1]))
+            me = os.getpid()
+            pids = sorted({pid for pid in candidates if pid != me})
+        for pid in pids:
+            try:
+                # Send SIGTERM first
+                os.kill(pid, signal.SIGTERM)
+            except Exception:
+                continue
+        if pids:
+            time.sleep(grace_s)
+        # Force kill remaining
+        for pid in pids:
+            if _ps_alive(pid):
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except Exception:
+                    pass
+    except Exception:
+        # Best effort only
+        pass
 
 
 def _compat_patch_fusion_hat_modules():
@@ -188,41 +265,7 @@ def _maybe_set_i2c_bus_from_env_or_pi5():
         pass
 
 
-# ---- Fake hardware for dry-run/CI ----
-class _FakePicarx:
-    def __init__(self):
-        self._power = 0
-        self._steering_angle = 0
-        self._pan = 0
-        self._tilt = 0
-
-    # Drive
-    def forward(self, power: float):
-        self._power = float(_clamp(power, 0, 100))
-
-    def backward(self, power: float):
-        self._power = -float(_clamp(power, 0, 100))
-
-    def stop(self):
-        self._power = 0
-
-    # Steering
-    def set_steering_angle(self, angle: float):
-        self._steering_angle = float(angle)
-
-    # Head
-    def set_camera_pan_angle(self, angle: float):
-        self._pan = float(angle)
-
-    def set_camera_tilt_angle(self, angle: float):
-        self._tilt = float(angle)
-
-    # Ultrasonic
-    def get_distance(self) -> float:
-        # Return a plausible, stable-ish value without flapping
-        base = 30.0
-        jitter = (time.time() * 1000.0) % 7  # 0..7
-        return round(base + (jitter - 3.5), 2)
+# (Removed: fake hardware mock. This controller now targets real hardware only.)
 
 
 def _resolve_picarx_class():
@@ -362,8 +405,29 @@ def _do_head(px: Any, pan: Optional[int], tilt: Optional[int], max_angle: int) -
     }
 
 
+def _with_timeout(fn, timeout_s: float, *args, **kwargs):
+    """Run fn in a thread with a timeout; raise TimeoutError on expiry."""
+    import threading
+    res = {'val': None, 'err': None}
+    def _run():
+        try:
+            res['val'] = fn(*args, **kwargs)
+        except Exception as e:
+            res['err'] = e
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    t.join(timeout_s)
+    if t.is_alive():
+        raise TimeoutError(f'operation timed out after {timeout_s:.2f}s')
+    if res['err'] is not None:
+        raise res['err']
+    return res['val']
+
+
 def _do_snapshot(px: Any, out_path: Optional[str] = None, vflip: bool = False, hflip: bool = False) -> Dict[str, Any]:
-    # Use vilib for camera handling (v2 stack includes vilib)
+    # Use vilib for camera handling (v2 stack includes vilib). Enforce short timeouts.
+    cam_timeout = float(os.environ.get('PICARX_CAMERA_TIMEOUT', '1.0'))
+    warmup_s = float(os.environ.get('PICARX_CAMERA_WARMUP', '0.15'))
     try:
         from vilib import Vilib
     except Exception as e:
@@ -372,7 +436,8 @@ def _do_snapshot(px: Any, out_path: Optional[str] = None, vflip: bool = False, h
     # Determine output path
     if out_path:
         out_dir = os.path.dirname(out_path)
-        out_name = os.path.splitext(os.path.basename(out_path))[0]
+        base = os.path.splitext(os.path.basename(out_path))[0]
+        out_name = base
     else:
         out_dir = _CAMERA_DEFAULT_DIR
         ts = datetime.now().strftime('%Y%m%d-%H%M%S')
@@ -388,19 +453,40 @@ def _do_snapshot(px: Any, out_path: Optional[str] = None, vflip: bool = False, h
         out_path = os.path.join(out_dir, out_name + '.jpg')
 
     try:
-        Vilib.camera_start(vflip=bool(vflip), hflip=bool(hflip))
-        # Small delay to warm up
-        time.sleep(0.2)
-        # Vilib.take_photo takes base name and path (dir)
-        Vilib.take_photo(out_name, out_dir)
-        # Attempt to close camera
+        # Ensure previous session is closed quickly
+        try:
+            _with_timeout(lambda: Vilib.camera_close(), 0.2)
+        except Exception:
+            pass
+
+        # Start camera with timeout
+        def _start():
+            try:
+                Vilib.camera_start(vflip=bool(vflip), hflip=bool(hflip))
+            except TypeError:
+                Vilib.camera_start()
+        _with_timeout(_start, cam_timeout)
+
+        # Short and bounded warm-up
+        time.sleep(min(max(warmup_s, 0.0), 0.5))
+
+        # Take photo with timeout; vilib expects (basename, dir)
+        _with_timeout(Vilib.take_photo, cam_timeout, out_name, out_dir)
+
+        # Attempt close, best effort
+        try:
+            _with_timeout(lambda: Vilib.camera_close(), 0.3)
+        except Exception:
+            pass
+        return {'ok': True, 'action': 'snapshot', 'path': os.path.join(out_dir, out_name + '.jpg')}
+    except TimeoutError as e:
         try:
             Vilib.camera_close()
         except Exception:
             pass
-        return {'ok': True, 'action': 'snapshot', 'path': out_path}
+        return {'ok': False, 'action': 'snapshot', 'error': str(e), 'path': os.path.join(out_dir, out_name + '.jpg')}
     except Exception as e:
-        return {'ok': False, 'action': 'snapshot', 'error': str(e), 'path': out_path}
+        return {'ok': False, 'action': 'snapshot', 'error': str(e), 'path': os.path.join(out_dir, out_name + '.jpg')}
 
 
 def _do_ultrasonic(px: Any) -> Dict[str, Any]:
@@ -431,9 +517,7 @@ def _do_stop(px: Any) -> Dict[str, Any]:
     return {'ok': True, 'action': 'stop'}
 
 
-def _make_px(fake: bool):
-    if fake:
-        return _FakePicarx()
+def _make_px():
     # Prefer local project path unless disabled
     # Optional explicit module dir (e.g. to point at a v2 checkout)
     module_dir = os.environ.get('PICARX_MODULE_DIR')
@@ -452,10 +536,11 @@ def _make_px(fake: bool):
     _maybe_set_i2c_bus_from_env_or_pi5()
     try:
         cls = _resolve_picarx_class()
-        try:
+        # Guard constructor with a short timeout to avoid hangs
+        init_timeout = float(os.environ.get('PICARX_INIT_TIMEOUT', '1.0'))
+        def _construct():
             return cls()
-        except TypeError:
-            return cls()
+        return _with_timeout(_construct, init_timeout)
     except ImportError:
         # Fallback: try site-installed picarx by removing local path
         if added_local:
@@ -469,10 +554,10 @@ def _make_px(fake: bool):
             except Exception:
                 pass
         cls = _resolve_picarx_class()
-        try:
+        init_timeout = float(os.environ.get('PICARX_INIT_TIMEOUT', '1.0'))
+        def _construct2():
             return cls()
-        except TypeError:
-            return cls()
+        return _with_timeout(_construct2, init_timeout)
 
 
 def parse_args(argv=None):
@@ -516,12 +601,30 @@ def main(argv=None) -> int:
     # Safety clamps (defaults)
     max_speed = _env_int('PICARX_MAX_SPEED', 60)
     max_angle = _env_int('PICARX_MAX_ANGLE', 35)
-    fake = os.environ.get('PICARX_FAKE', '0') == '1'
+    # Fake mode removed: controller uses only real hardware.
 
     _setup_signals()
 
     global _PX_OBJ
-    _PX_OBJ = _make_px(fake)
+    _PX_OBJ = None
+    # Proactively clear GPIO blockers before initializing hardware
+    _free_gpio_blockers()
+    try:
+        _PX_OBJ = _make_px()
+    except TimeoutError as e:
+        result = {'ok': False, 'action': args.command, 'error': f'init timeout: {e}'}
+        if args.json:
+            print(json.dumps(result, separators=(',', ':'), ensure_ascii=False))
+        else:
+            print(result)
+        return 1
+    except Exception as e:
+        result = {'ok': False, 'action': args.command, 'error': f'init failed: {e}'}
+        if args.json:
+            print(json.dumps(result, separators=(',', ':'), ensure_ascii=False))
+        else:
+            print(result)
+        return 1
 
     # Restore previously set head position so it persists across commands
     if args.command != 'head':
