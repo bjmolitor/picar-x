@@ -18,3 +18,4 @@ picarx.egg-info/SOURCES.txt
 picarx.egg-info/top_level.txt
 .gitignore
 gpt_examples/__pycache__/aiagentctrl.cpython-311.pyc
+OpenClaw_PiCar-X_skill/
